@@ -1,103 +1,172 @@
 name: Create Glow for Facebook app
-
 on:
   workflow_dispatch:
     inputs:
-
       ipa_url:
         description: "URL to the decrypted IPA file"
         default: ""
         required: true
         type: string
-
       display_name:
         description: "App Name (Optional)"
         default: "Facebook"
         required: true
         type: string
-
       bundle_id:
         description: "BundleID (Optional)"
         default: "com.facebook.Facebook"
         required: true
         type: string
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   build:
-    name: 
+    name: Build IPA
     runs-on: macos-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout Main
         uses: actions/checkout@v4.1.1
         with:
           path: main
           submodules: recursive
-
       - name: Hide sensitive inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
           exclude_inputs: display_name,bundle_id
-
       - name: Download and validate IPA
         run: |
           wget "${{ inputs.ipa_url }}" --no-verbose -O ${{ github.workspace }}/facebook.ipa
-
           file_type=$(file --mime-type -b ${{ github.workspace }}/facebook.ipa)
-
           if [[ "$file_type" != "application/x-ios-app" && "$file_type" != "application/zip" ]]; then
             echo "::error::Validation failed: The downloaded file is not a valid IPA. Detected type: $file_type."
             exit 1
           fi
-
+      - name: Extract version from Info.plist
+        run: |
+          echo "==> Extracting version from Info.plist..."
+          
+          # Create temporary directory
+          temp_dir=$(mktemp -d)
+          cd "$temp_dir"
+          
+          # Extract IPA to get Info.plist
+          unzip -q "${{ github.workspace }}/facebook.ipa"
+          
+          # Find Info.plist in the Payload directory
+          info_plist_path=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
+          
+          if [[ -z "$info_plist_path" ]]; then
+            echo "::error::Info.plist not found in IPA"
+            exit 1
+          fi
+          
+          echo "Found Info.plist at: $info_plist_path"
+          
+          # Extract version using plutil (available on macOS)
+          app_version=$(plutil -extract CFBundleShortVersionString raw "$info_plist_path" 2>/dev/null || echo "")
+          
+          # If CFBundleShortVersionString is not available, try CFBundleVersion
+          if [[ -z "$app_version" ]]; then
+            app_version=$(plutil -extract CFBundleVersion raw "$info_plist_path" 2>/dev/null || echo "unknown")
+          fi
+          
+          echo "Extracted version: $app_version"
+          echo "APP_VERSION=$app_version" >> $GITHUB_ENV
+          
+          # Cleanup
+          cd "${{ github.workspace }}"
+          rm -rf "$temp_dir"
+      - name: Remove Swift Libraries from IPA
+        run: |
+          echo "==> Checking for Swift libraries in IPA..."
+          
+          # Check if Swift libraries exist
+          swift_files=$(unzip -l facebook.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
+          
+          if [ "$swift_files" -gt 0 ]; then
+            echo "==> Found $swift_files Swift library files - Removing them..."
+            
+            # Create temporary directory
+            temp_dir=$(mktemp -d)
+            cd "$temp_dir"
+            
+            # Extract IPA
+            unzip -q "${{ github.workspace }}/facebook.ipa"
+            
+            # Find and remove Swift libraries
+            find . -name "libswift_Concurrency.dylib" -type f -delete
+            find . -name "libswiftCore.dylib" -type f -delete
+            
+            # List what's in Frameworks after removal (for debugging)
+            echo "==> Frameworks directory contents after removal:"
+            find . -path "*/Frameworks/*" -name "*.dylib" | head -20
+            
+            # Recreate IPA
+            zip -r -9 -q facebook_cleaned.ipa Payload/
+            
+            # Replace original IPA
+            mv facebook_cleaned.ipa "${{ github.workspace }}/facebook.ipa"
+            
+            # Verify removal
+            cd "${{ github.workspace }}"
+            remaining_swift=$(unzip -l facebook.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
+            
+            if [ "$remaining_swift" -eq 0 ]; then
+              echo "✅ Successfully removed all Swift libraries"
+            else
+              echo "⚠️ Warning: $remaining_swift Swift library files still remain"
+            fi
+            
+            # Cleanup
+            rm -rf "$temp_dir"
+          else
+            echo "✅ No Swift libraries found to remove"
+          fi
       - name: Install Dependencies
         run: brew install make ldid
-
       - name: Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
-
       - name: Install cyan
         run: pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
-
       - name: Download Glow for Facebook
         id: download_glow
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           api_url="https://api.github.com/repos/dayanch96/Glow/releases/latest"
-
           # Workaround
           curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$api_url" > /dev/null
-
           response=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$api_url")
           tag_name=$(echo "$response" | jq -r '.tag_name')
           deb_url=$(echo "$response" | jq -r '.assets[0].browser_download_url')
-
           if [[ "$deb_url" == "null" || -z "$deb_url" ]]; then
             echo "::error::Failed to get tweak URL from Github API"
             exit 1
           fi
-
           echo "GLOW_TAG=$tag_name" >> $GITHUB_ENV
           echo "Downloading: $deb_url"
           wget "$deb_url" --no-verbose -O ${{ github.workspace }}/glow_fb.deb
-
       - name: Inject tweaks into IPA
-        run: cyan -i facebook.ipa -o Glow_FB_${{ env.GLOW_TAG }}.ipa -uwef glow_fb.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} -s
-
+        run: cyan -i facebook.ipa -o Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa -uwef glow_fb.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} -s
+      - name: Verify final IPA (Optional)
+        run: |
+          echo "==> Final verification of output IPA..."
+          final_swift=$(unzip -l Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
+          if [ "$final_swift" -eq 0 ]; then
+            echo "✅ Final IPA confirmed: No unwanted Swift libraries"
+          else
+            echo "⚠️ Final IPA contains $final_swift Swift library files"
+            unzip -l Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)"
+          fi
       - uses: softprops/action-gh-release@v2.0.1
         with:
           tag_name: glow-fb-${{ env.GLOW_TAG }}
-          name: Glow_FB ${{ env.GLOW_TAG }}
-          files: Glow_FB_${{ env.GLOW_TAG }}.ipa
+          name: Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}
+          files: Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa
           draft: true
-
       - name: Output Release URL
         run: |
           echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases"
