@@ -79,6 +79,48 @@ jobs:
           # Cleanup
           cd "${{ github.workspace }}"
           rm -rf "$temp_dir"
+      - name: Remove URL Schemes from Info.plist
+        run: |
+          echo "==> Removing URL Schemes from Info.plist..."
+          
+          # Create temporary directory
+          temp_dir=$(mktemp -d)
+          cd "$temp_dir"
+          
+          # Extract IPA
+          unzip -q "${{ github.workspace }}/facebook.ipa"
+          
+          # Find Info.plist in the Payload directory
+          info_plist_path=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
+          
+          if [[ -z "$info_plist_path" ]]; then
+            echo "::error::Info.plist not found in IPA"
+            exit 1
+          fi
+          
+          echo "Found Info.plist at: $info_plist_path"
+          
+          # Check if CFBundleURLTypes exists
+          if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
+            echo "==> Found URL Schemes, removing them..."
+            
+            # Remove CFBundleURLTypes completely
+            plutil -remove CFBundleURLTypes "$info_plist_path"
+            
+            echo "✅ Successfully removed all URL Schemes"
+          else
+            echo "✅ No URL Schemes found to remove"
+          fi
+          
+          # Recreate IPA with modified Info.plist
+          zip -r -9 -q facebook_modified.ipa Payload/
+          
+          # Replace original IPA
+          mv facebook_modified.ipa "${{ github.workspace }}/facebook.ipa"
+          
+          # Cleanup
+          cd "${{ github.workspace }}"
+          rm -rf "$temp_dir"
       - name: Remove Swift Libraries from IPA
         run: |
           echo "==> Checking for Swift libraries in IPA..."
@@ -161,6 +203,22 @@ jobs:
             echo "⚠️ Final IPA contains $final_swift Swift library files"
             unzip -l Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)"
           fi
+          
+          # Also verify URL Schemes removal in final IPA
+          echo "==> Checking URL Schemes in final IPA..."
+          temp_dir=$(mktemp -d)
+          cd "$temp_dir"
+          unzip -q "${{ github.workspace }}/Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa"
+          info_plist_path=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
+          if [[ -n "$info_plist_path" ]]; then
+            if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
+              echo "⚠️ Final IPA still contains URL Schemes"
+            else
+              echo "✅ Final IPA confirmed: No URL Schemes"
+            fi
+          fi
+          cd "${{ github.workspace }}"
+          rm -rf "$temp_dir"
       - uses: softprops/action-gh-release@v2.0.1
         with:
           tag_name: glow-fb-${{ env.GLOW_TAG }}
