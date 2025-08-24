@@ -79,9 +79,10 @@ jobs:
           # Cleanup
           cd "${{ github.workspace }}"
           rm -rf "$temp_dir"
-      - name: Remove URL Schemes from Info.plist
+
+      - name: Remove Swift Libraries and URL Schemes from IPA
         run: |
-          echo "==> Removing URL Schemes from Info.plist..."
+          echo "==> Processing IPA: Removing Swift libraries and URL Schemes..."
           
           # Create temporary directory
           temp_dir=$(mktemp -d)
@@ -93,50 +94,26 @@ jobs:
           # Find Info.plist in the Payload directory
           info_plist_path=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
           
-          if [[ -z "$info_plist_path" ]]; then
-            echo "::error::Info.plist not found in IPA"
-            exit 1
-          fi
-          
-          echo "Found Info.plist at: $info_plist_path"
-          
-          # Check if CFBundleURLTypes exists
-          if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
-            echo "==> Found URL Schemes, removing them..."
+          if [[ -n "$info_plist_path" ]]; then
+            echo "Found Info.plist at: $info_plist_path"
             
-            # Remove CFBundleURLTypes completely
-            plutil -remove CFBundleURLTypes "$info_plist_path"
-            
-            echo "✅ Successfully removed all URL Schemes"
+            # Remove URL Schemes
+            if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
+              echo "==> Found URL Schemes, removing them..."
+              plutil -remove CFBundleURLTypes "$info_plist_path"
+              echo "✅ Successfully removed all URL Schemes"
+            else
+              echo "✅ No URL Schemes found to remove"
+            fi
           else
-            echo "✅ No URL Schemes found to remove"
+            echo "⚠️ Warning: Info.plist not found in IPA"
           fi
           
-          # Recreate IPA with modified Info.plist
-          zip -r -9 -q facebook_modified.ipa Payload/
-          
-          # Replace original IPA
-          mv facebook_modified.ipa "${{ github.workspace }}/facebook.ipa"
-          
-          # Cleanup
-          cd "${{ github.workspace }}"
-          rm -rf "$temp_dir"
-      - name: Remove Swift Libraries from IPA
-        run: |
-          echo "==> Checking for Swift libraries in IPA..."
-          
-          # Check if Swift libraries exist
-          swift_files=$(unzip -l facebook.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
+          # Check and remove Swift libraries
+          swift_files=$(find . -name "libswift_Concurrency.dylib" -o -name "libswiftCore.dylib" | wc -l)
           
           if [ "$swift_files" -gt 0 ]; then
             echo "==> Found $swift_files Swift library files - Removing them..."
-            
-            # Create temporary directory
-            temp_dir=$(mktemp -d)
-            cd "$temp_dir"
-            
-            # Extract IPA
-            unzip -q "${{ github.workspace }}/facebook.ipa"
             
             # Find and remove Swift libraries
             find . -name "libswift_Concurrency.dylib" -type f -delete
@@ -146,27 +123,30 @@ jobs:
             echo "==> Frameworks directory contents after removal:"
             find . -path "*/Frameworks/*" -name "*.dylib" | head -20
             
-            # Recreate IPA
-            zip -r -9 -q facebook_cleaned.ipa Payload/
-            
-            # Replace original IPA
-            mv facebook_cleaned.ipa "${{ github.workspace }}/facebook.ipa"
-            
-            # Verify removal
-            cd "${{ github.workspace }}"
-            remaining_swift=$(unzip -l facebook.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
-            
-            if [ "$remaining_swift" -eq 0 ]; then
-              echo "✅ Successfully removed all Swift libraries"
-            else
-              echo "⚠️ Warning: $remaining_swift Swift library files still remain"
-            fi
-            
-            # Cleanup
-            rm -rf "$temp_dir"
+            echo "✅ Successfully removed all Swift libraries"
           else
             echo "✅ No Swift libraries found to remove"
           fi
+          
+          # Recreate IPA with all modifications
+          zip -r -9 -q facebook_processed.ipa Payload/
+          
+          # Replace original IPA
+          mv facebook_processed.ipa "${{ github.workspace }}/facebook.ipa"
+          
+          # Verify modifications
+          cd "${{ github.workspace }}"
+          
+          # Verify Swift libraries removal
+          remaining_swift=$(unzip -l facebook.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
+          if [ "$remaining_swift" -eq 0 ]; then
+            echo "✅ Final verification: No unwanted Swift libraries"
+          else
+            echo "⚠️ Warning: $remaining_swift Swift library files still remain"
+          fi
+          
+          # Cleanup
+          rm -rf "$temp_dir"
       - name: Install Dependencies
         run: brew install make ldid
       - name: Set PATH environment variable
@@ -193,6 +173,7 @@ jobs:
           wget "$deb_url" --no-verbose -O ${{ github.workspace }}/glow_fb.deb
       - name: Inject tweaks into IPA
         run: cyan -i facebook.ipa -o Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa -uwef glow_fb.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} -s
+
       - name: Verify final IPA (Optional)
         run: |
           echo "==> Final verification of output IPA..."
@@ -203,11 +184,10 @@ jobs:
             echo "⚠️ Final IPA contains $final_swift Swift library files"
             unzip -l Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)"
           fi
-          
-          # Also verify URL Schemes removal in final IPA
+          # Also verify URL Schemes removal
           echo "==> Checking URL Schemes in final IPA..."
-          temp_dir=$(mktemp -d)
-          cd "$temp_dir"
+          temp_verify_dir=$(mktemp -d)
+          cd "$temp_verify_dir"
           unzip -q "${{ github.workspace }}/Facebook_${{ env.APP_VERSION }}_Glow_${{ env.GLOW_TAG }}.ipa"
           info_plist_path=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
           if [[ -n "$info_plist_path" ]]; then
@@ -218,7 +198,7 @@ jobs:
             fi
           fi
           cd "${{ github.workspace }}"
-          rm -rf "$temp_dir"
+          rm -rf "$temp_verify_dir"
       - uses: softprops/action-gh-release@v2.0.1
         with:
           tag_name: glow-fb-${{ env.GLOW_TAG }}
