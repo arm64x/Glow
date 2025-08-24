@@ -97,13 +97,63 @@ jobs:
           if [[ -n "$info_plist_path" ]]; then
             echo "Found Info.plist at: $info_plist_path"
             
-            # Remove URL Schemes
-            if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
-              echo "==> Found URL Schemes, removing them..."
-              plutil -remove CFBundleURLTypes "$info_plist_path"
-              echo "✅ Successfully removed all URL Schemes"
+            # Convert to XML format first (in case it's binary)
+            plutil -convert xml1 "$info_plist_path"
+            
+            # Debug: Show current CFBundleURLTypes content
+            echo "==> Checking current CFBundleURLTypes content..."
+            if plutil -extract CFBundleURLTypes raw "$info_plist_path" 2>/dev/null; then
+              echo "==> CFBundleURLTypes found, content above"
             else
-              echo "✅ No URL Schemes found to remove"
+              echo "==> CFBundleURLTypes not found with plutil, checking with grep..."
+              if grep -q "CFBundleURLTypes" "$info_plist_path"; then
+                echo "==> CFBundleURLTypes found with grep"
+                grep -A 5 -B 5 "CFBundleURLTypes" "$info_plist_path"
+              else
+                echo "==> CFBundleURLTypes not found with grep either"
+              fi
+            fi
+            
+            # Remove URL Schemes using plutil
+            if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
+              echo "==> Found URL Schemes with plutil, removing them..."
+              plutil -remove CFBundleURLTypes "$info_plist_path"
+              echo "✅ Successfully removed all URL Schemes with plutil"
+            else
+              # Fallback: use sed to remove URL Schemes if plutil fails
+              if grep -q "CFBundleURLTypes" "$info_plist_path"; then
+                echo "==> Using sed fallback to remove URL Schemes..."
+                # Create backup
+                cp "$info_plist_path" "$info_plist_path.backup"
+                
+                # Use sed to remove CFBundleURLTypes section
+                sed -i '' '/<key>CFBundleURLTypes<\/key>/,/<\/array>/d' "$info_plist_path"
+                
+                # Verify removal
+                if ! grep -q "CFBundleURLTypes" "$info_plist_path"; then
+                  echo "✅ Successfully removed all URL Schemes with sed"
+                else
+                  echo "⚠️ sed removal may have failed, trying alternative approach..."
+                  # Restore backup and try different approach
+                  mv "$info_plist_path.backup" "$info_plist_path"
+                  
+                  # More aggressive sed removal
+                  awk '
+                    /<key>CFBundleURLTypes<\/key>/ { skip=1; next }
+                    skip && /<\/array>/ { skip=0; next }
+                    !skip
+                  ' "$info_plist_path" > "$info_plist_path.tmp"
+                  mv "$info_plist_path.tmp" "$info_plist_path"
+                  
+                  if ! grep -q "CFBundleURLTypes" "$info_plist_path"; then
+                    echo "✅ Successfully removed all URL Schemes with awk"
+                  else
+                    echo "❌ Failed to remove URL Schemes"
+                  fi
+                fi
+              else
+                echo "✅ No URL Schemes found to remove"
+              fi
             fi
           else
             echo "⚠️ Warning: Info.plist not found in IPA"
